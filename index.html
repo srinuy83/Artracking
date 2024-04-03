@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <link rel="shortcut icon" href="#" />
+    <title>Babylon.js WebAR SDK</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,shrink-to-fit=no,user-scalable=no,viewport-fit=cover">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="theme-color" content="black">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.6.2/dat.gui.min.js"></script>
+    <script src="https://cdn.babylonjs.com/babylon.js"></script>
+    <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+    <script src="https://cdn.babylonjs.com/gui/babylon.gui.min.js"></script>
+    <script src="https://webar-sdk.blippar.com/releases/1.7.3/webar-sdk-v1.7.3.min.js?license-key=f2a996ac-cbde-45d2-a3e1-94110f14df1f"
+            webar-mode="surface-tracking"
+            auto-init="true"
+            auto-start="true"
+            render-scene-on-desktop="true"
+            show-qr-card-on-desktop="true"
+            rendering-engine="babylonjs"></script>
+    <style>
+        #renderCanvas {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100vw;
+            height: 100vh;
+            touch-action: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="renderCanvas"></canvas>
+    <script>
+        var canvas = document.getElementById("renderCanvas");
+
+        var sceneIndex = 1;
+        var engine = null;
+        var scene = null;
+        var sceneToRender = null;
+        var webarStage = null;
+        var webarUXControl = null;
+        var sceneTwo;
+        var scenes;
+        var currentSceneMeshes = [];
+        var meshNodeData = [];
+        var gltfObjects = [];
+        var meshParent, VideoTexture, audio;
+        var videos = new Map();
+        var audios = new Map();
+        var copyMap = new Map();
+        var hotspotNodeMap = new Map();
+        var hotspotBoolMap = new Map();
+        var optionState = new Map();
+
+        var scaleByFactor = function (obj, factor) {
+            obj.scaling.x = obj.scaling.x * factor;
+            obj.scaling.y = obj.scaling.y * factor;
+            obj.scaling.z = obj.scaling.z * factor;
+        }
+        function adjustMeshForDevice(webarUXControlMesh) {
+            const disableStageCursor = !(webarUXControlMesh?.webarOptions?.stageCursorUX) ?? true;
+
+            if (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) && !disableStageCursor) {
+
+                return {
+                    angle: -Math.PI / 2,
+                    yMeshPosition: 0.2
+                };
+            } else {
+                return {
+                    angle: Math.PI / 2,
+                    yMeshPosition: -0.2
+                };
+            }
+        }
+        var createDefaultEngine = function () { return new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true, disableWebGL2Support: false }); };
+
+        var createScene = function () {
+
+            // This creates a basic Babylon Scene object (non-mesh)
+            var scene = new BABYLON.Scene(engine);
+            scene.environmentTexture = BABYLON.CubeTexture.CreateFromPrefilteredData("./models/environment.dds", scene);
+
+            //var camera = new BABYLON.UniversalCamera("camera1", new BABYLON.Vector3(0, 5, -10), scene);
+            var camera = new BABYLON.FreeCamera("camera1", new BABYLON.Vector3(0, 5, -10), scene);
+            camera.setTarget(BABYLON.Vector3.Zero());
+            var light = new BABYLON.HemisphericLight("HemiLight", new BABYLON.Vector3(0, 1, 0), scene);
+            light.intensity = 0.7;
+
+            // Create an empty webarStage mesh. Models/meshes appended as a children to this webarStage mesh will be displayed on the surface.
+            webarStage = new BABYLON.Mesh("webarStage", scene);
+
+            //  Create a 'webar-ux-control' Mesh
+            webarUXControl = new BABYLON.Mesh("webar-ux-control", scene);
+            webarUXControl.setParent(webarStage); // Set webarStage as parent to webarUXControl mesh so that it appears on the surface
+
+            // Set webar options to webarUXControl mesh to enable/disable stage cursor UX, user gesture rotation and scaling
+            webarUXControl.webarOptions = {
+                stageCursorUX: true,
+                userGestureRotation: true,
+                userGestureScale: true
+            };
+
+            let webarUXControlMesh = webarStage.getChildMeshes().find(mesh => mesh.name === "webar-ux-control");
+            const deviceAdjustments = adjustMeshForDevice(webarUXControlMesh);
+            let angle = deviceAdjustments.angle;
+            let yMeshPosition = deviceAdjustments.yMeshPosition;
+            let xQuat = new BABYLON.Quaternion();
+            BABYLON.Quaternion.FromEulerAnglesToRef(angle, 0, 0, xQuat);
+
+            readJson(scene, webarUXControl, xQuat, yMeshPosition);
+
+            // Pass babylon canvas, scene, camera, webarStage mesh & webarUXControl(optional) to WebarSdk to initialize surface tracking
+            setTimeout(() => {
+                WEBARSDK.InitBabylonJs(canvas, scene, camera, webarStage, webarUXControl);
+            }, 4000);
+
+
+            webarStage.position.x = 0;
+            webarStage.position.y = -0.5;
+            webarStage.position.z = 3;
+            let yQuat = new BABYLON.Quaternion();
+            BABYLON.Quaternion.FromEulerAnglesToRef(0, Math.PI, 0, yQuat);
+            webarStage.rotationQuaternion = yQuat;
+
+            scene.onPointerObservable.add((eventData) => {
+                if (eventData.type == BABYLON.PointerEventTypes.POINTERDOWN ||
+                    eventData.type == BABYLON.PointerEventTypes.POINTERDOUBLETAP) {
+                    //console.log(eventData.pickInfo?.pickedMesh);
+                    scenes.forEach((_scene) => {
+                        _scene.meshObjects.forEach((_meshObject) => {
+                            if (eventData.pickInfo?.pickedMesh != null) {
+                                if (_meshObject.meshType == ContentType.Hotspot && _meshObject.id == eventData.pickInfo?.pickedMesh.name) {
+                                    console.log(_meshObject);
+                                    event_actions(_meshObject);
+                                }
+                            }
+                        });
+
+                    });
+                }
+            });
+
+            return scene;
+
+        };
+
+        var sparksystem = null;
+        var smokesystem = null;
+
+        var startParticles = function (scene, fountain) {
+            let sphereSpark = BABYLON.MeshBuilder.CreateSphere("sphereSpark", { diameter: 0.4, segments: 32 }, scene);
+            sphereSpark.isVisible = false;
+            sphereSpark.setParent(fountain);
+            BABYLON.ParticleHelper.ParseFromFileAsync(null, "./models/spark_particles.json", scene, false).then(system => {
+                sparksystem = system;
+                system.emitter = sphereSpark;
+            });
+        };
+
+        window.initFunction = async function () {
+            var asyncEngineCreation = async function () {
+                try {
+                    return createDefaultEngine();
+                } catch (e) {
+                    console.log("the available createEngine function failed. Creating the default engine instead");
+                    return createDefaultEngine();
+                }
+            }
+
+            window.engine = await asyncEngineCreation();
+            if (!engine) throw 'engine should not be null.';
+            window.scene = createScene();
+        };
+
+        initFunction().then(() => {
+            sceneToRender = window.scene;
+            sceneToRender.executeWhenReady(function () {
+                engine.runRenderLoop(function () {
+                    if (sceneToRender && sceneToRender.activeCamera) {
+                        sceneToRender.render();
+                    }
+                });
+            });
+        });
+
+        window.addEventListener("resize", function () {
+            engine.resize();
+        });
+
+        WEBARSDK.SetStageReadyCallback(() => {
+            console.info('Stage is ready now!!!');
+
+            // Start spark and smoke particles
+            var toggleCounter = 0;
+            setInterval(() => {
+                console.log('Restart spark');
+
+                if (toggleCounter % 2 === 0) {
+                    if (sparksystem !== null) {
+                        sparksystem.stop();
+                        sparksystem.reset();
+                        sparksystem.start()
+                    }
+                }
+                else {
+                    if (smokesystem !== null) {
+                        smokesystem.stop();
+                        smokesystem.reset();
+                        smokesystem.start();
+                    }
+                }
+
+                ++toggleCounter;
+            },
+                3000);
+        });
+
+
+        var readJson = function (_scene, fountain, xQuat, yMeshPosition) {
+
+            var data = '[{"id":1,"name":"Scene 1","meshObjects":[{"id":"1000","name":"new 3D object","sceneId":1,"meshType":"gltf","isLock":false,"position":{"x":-2.1737213134765625,"y":1.836345911026001,"z":0.6391922831535339},"rotation":{"x":0,"y":0,"z":0},"scale":{"x":0.97,"y":1.26,"z":0.62},"mediaUrl":"content/media/e2fb6cd2-4ab7-42dd-addd-5cd3a21c6fe8/scene.gltf","replace":false,"mediaName":"realistic_human_heart.zip","triggerEvent":"","targetobjectId":"","actionType":"","actionData":{},"isObjectVisible":true,"objectInteraction":"","chatbot":{"avatgt":"","avalink":"","avabot":"","avaaction":"","hotspotUrl":"","hotspotColor":"","bgColor":"","transparency":0,"isBorder":false,"borderColor":"","tatc":""},"avatarSettings":{"isMsgProp":"","pos":{"x":"","y":"","z":""},"rot":{"x":"","y":"","z":""},"scl":{"x":"","y":"","z":""},"textColor":"","bgColor":"","transparency":0,"isBorder":"","borderColor":""}},{"id":"1001","name":"new hotspot","sceneId":1,"meshType":"hotspot","isLock":false,"position":{"x":-2.233163833618164,"y":2.829935312271118,"z":-0.2509578764438629},"rotation":{"x":0,"y":0,"z":0},"scale":{"x":0.4,"y":1,"z":0.77},"mediaUrl":"assets/img/round-shap/index1.svg","replace":false,"objectSettings":{"transparency":0,"isBackground":false,"backgroundColor":"","isBorder":false,"borderColor":"","borderWidth":"","hotspotColor":"#ddb00e","radius":"","textColor":"","textStyle":"","height":"","width":"","fontSize":"","autoPlay":""},"isObjectVisible":true,"triggerEvent":"on_tap","actionType":"display_message","actionData":{"displayMassage":{"dmsg":"Cloud-based Instancy Learning Platform enables the creation, management and delivery of online training and education","transparency":0,"textColor":"","backgroundColor":"","borderColor":""}},"chatbot":{"avatgt":"","avalink":"","avabot":"","avaaction":"","hotspotUrl":"","hotspotColor":"","bgColor":"","transparency":0,"isBorder":false,"borderColor":"","tatc":""},"avatarSettings":{"isMsgProp":"","pos":{"x":"","y":"","z":""},"rot":{"x":"","y":"","z":""},"scl":{"x":"","y":"","z":""},"textColor":"","bgColor":"","transparency":0,"isBorder":"","borderColor":""}},{"id":"1002","name":"new hotspot","sceneId":1,"meshType":"hotspot","isLock":false,"position":{"x":-1.9708657264709473,"y":1.5484694242477417,"z":0.11881710588932037},"rotation":{"x":0,"y":0,"z":0},"scale":{"x":0.66,"y":0.53,"z":1},"mediaUrl":"assets/img/round-shap/index1.svg","replace":false,"objectSettings":{"transparency":0,"isBackground":false,"backgroundColor":"","isBorder":false,"borderColor":"","borderWidth":"","hotspotColor":"#ddb00e","radius":"","textColor":"","textStyle":"","height":"","width":"","fontSize":"","autoPlay":""},"isObjectVisible":true,"triggerEvent":"on_tap","actionType":"link_to_URL","actionData":{"url":"https://www.google.com"},"chatbot":{"avatgt":null,"avalink":null,"avabot":null,"avaaction":null,"hotspotUrl":null,"hotspotColor":null,"bgColor":null,"transparency":null,"isBorder":null,"borderColor":null,"tatc":null},"avatarSettings":{"isMsgProp":null,"pos":{"x":null,"y":null,"z":null},"rot":{"x":null,"y":null,"z":null},"scl":{"x":null,"y":null,"z":null},"textColor":null,"bgColor":null,"transparency":null,"isBorder":null,"borderColor":null}},{"id":"1003","name":"new video","sceneId":1,"meshType":"video","isLock":false,"position":{"x":1.8371280431747437,"y":1.722477912902832,"z":0.10000000149011612},"rotation":{"x":0,"y":0,"z":0},"scale":{"x":0.23,"y":0.28,"z":1},"mediaUrl":"content/media/2051/en-us/4037ed27-d3d6-4709-ae4e-2da62e1b8474.mp4","mediaName":"AI Video with Augumented","type":"","replace":false,"objectSettings":{"transparency":0,"isBackground":false,"backgroundColor":"","isBorder":false,"borderColor":"","borderWidth":"","hotspotColor":"","radius":"","textColor":"","textStyle":"","height":"","width":"","fontSize":"","autoPlay":false},"isObjectVisible":true,"actionData":{},"chatbot":{"avatgt":"","avalink":"","avabot":"","avaaction":"","hotspotUrl":"","hotspotColor":"","bgColor":"","transparency":0,"isBorder":false,"borderColor":"","tatc":""},"avatarSettings":{"isMsgProp":"","pos":{"x":"","y":"","z":""},"rot":{"x":"","y":"","z":""},"scl":{"x":"","y":"","z":""},"textColor":"","bgColor":"","transparency":0,"isBorder":"","borderColor":""}}],"sceneType":2,"mediaName":"download.jpg","mediaUrl":"content/media/2183/en-us/4b7a1e72-d6f9-4ac5-906b-434121c0f30e.jpg"}]';
+            scenes = JSON.parse(data);
+            var sceneNum = -1;
+            scenes.forEach(__scene => {
+                sceneNum++;
+                if (sceneIndex - 1 != sceneNum) {
+                    return;
+                }
+                if (__scene.sceneType != 2) {
+                    console.log("scene type is not ground tracking!");
+                    return;
+                }
+                __scene.meshObjects.forEach(__meshObject => {
+                    addObjectstotheScene(_scene, fountain, __meshObject, xQuat, yMeshPosition)
+                });
+            });
+        }
+        var addObjectstotheScene = function (_scene, fountain, __meshObject, xQuat, yMeshPosition) {
+            switch (__meshObject.meshType) {
+                case ShapeType.Sphere:
+                    const sphere = BABYLON.MeshBuilder.CreateSphere('sphere', {}, _scene);
+                    sphere.position = __meshObject.position;
+                    sphere.setParent(fountain);
+                    break;
+                case ShapeType.Cube:
+                    const cube = BABYLON.MeshBuilder.CreateBox('cube', {}, _scene);
+                    cube.position = __meshObject.position;
+                    cube.setParent(fountain);
+                    break;
+                case ShapeType.Cylinder:
+                    const cylinder = BABYLON.MeshBuilder.CreateCylinder('cylinder', {}, _scene);
+                    cylinder.position = __meshObject.position;
+                    cylinder.setParent(fountain);
+                    return cylinder
+                    break;
+                case ShapeType.Cone:
+                    const cone = BABYLON.MeshBuilder.CreateCylinder('cone', {}, _scene);
+                    cone.position = __meshObject.position;
+                    cone.setParent(fountain);
+                    break;
+                case ShapeType.Capsule:
+                    const capsule = BABYLON.MeshBuilder.CreateCapsule('capsule', {}, _scene);
+                    capsule.position = __meshObject.position;
+                    capsule.setParent(fountain);
+                    return capsule;
+                    break;
+                case ShapeType.PolyheDron:
+                    const polyhedron = BABYLON.MeshBuilder.CreatePolyhedron('polyhedron', {}, _scene);
+                    polyhedron.position = __meshObject.position;
+                    polyhedron.setParent(fountain);
+                    return polyhedron;
+                    break;
+                case ShapeType.GoldBerg:
+                    const goldberg = BABYLON.MeshBuilder.CreateGoldberg('goldberg', {}, _scene);
+                    goldberg.position = __meshObject.position;
+                    goldberg.setParent(fountain);
+                    break;
+                case ShapeType.IcoSphere:
+                    const icosphere = BABYLON.MeshBuilder.CreateIcoSphere('icosphere', {}, _scene);
+                    icosphere.position = __meshObject.position;
+                    icosphere.setParent(fountain);
+                    break;
+                case ShapeType.Torus:
+                    const torus = BABYLON.MeshBuilder.CreateTorus('torus', {}, _scene);
+                    torus.position = __meshObject.position;
+                    torus.setParent(fountain);
+                    break;
+                case ShapeType.TorusKnot:
+                    const torusKnot = BABYLON.MeshBuilder.CreateTorusKnot('torusKnot', {}, _scene);
+                    torusKnot.position = __meshObject.position;
+                    torusKnot.setParent(fountain);
+                    break;
+                case ShapeType.GLTF:
+                    let url2 = __meshObject.mediaUrl.toString();
+                    const lastSlashIndex = url2.lastIndexOf("/");
+                    const assetName = url2.substring(lastSlashIndex + 1);
+                    const restOfUrl = url2.substring(0, lastSlashIndex + 1);
+                    BABYLON.SceneLoader.ImportMesh(null, '/Artracking/' + restOfUrl, assetName, _scene, function (meshes, particleSystems, skeletons) {
+                        for (mesh of meshes) {
+                            if (mesh.name !== '__root__') {
+                                // Move the loaded models to webarUXControl
+                                mesh.setParent(fountain);
+                                mesh.rotationQuaternion.multiplyInPlace(xQuat);
+                                //mesh.position.y = yMeshPosition;
+                                mesh.position = new BABYLON.Vector3(__meshObject.position?.x, __meshObject.position?.y, __meshObject.position?.z);
+                                scaleByFactor(mesh, 1);
+                            }
+                        }
+                    });
+                    break;
+                case ShapeType.Image:
+                    var planeOpts = {
+                        height: 2,
+                        width: 2,
+                        sideOrientation: BABYLON.Mesh.DOUBLESIDE
+                    };
+                    var Image = BABYLON.MeshBuilder.CreatePlane(__meshObject.id, planeOpts, _scene);
+                    Image.position = __meshObject.position;
+                    var mat = new BABYLON.StandardMaterial("mat1", _scene);
+                    var texture = new BABYLON.Texture(__meshObject.mediaUrl, _scene);
+                    mat.diffuseTexture = texture;
+                    mat.emissiveColor = this.hexToColor3('#0E0D0DFF'); 
+                    mat.diffuseTexture.hasAlpha = true;
+                    mat.useAlphaFromDiffuseTexture = true;
+                    Image.material = mat;
+                    break;
+
+                case ShapeType.Audio:
+                    var planeOpts = {
+                        height: 1,
+                        width: 1,
+                        sideOrientation: BABYLON.Mesh.DOUBLESIDE
+                    };
+                    var _audioPlane = BABYLON.MeshBuilder.CreatePlane(__meshObject.id, planeOpts, _scene);
+                    var pos = (new BABYLON.Vector3(0, 0, 0.1))                    
+                    _audioPlane.position = __meshObject.position;
+                    var url = "audio.png";
+                    var mat = new BABYLON.StandardMaterial("mat1", _scene); 
+                    var texture = new BABYLON.Texture(__meshObject.mediaUrl, _scene);
+                    mat.diffuseTexture = texture;
+                    audio = new BABYLON.Audio(__meshObject.mediaUrl);
+                    audios.set(_audioPlane, audio);
+                    _audioPlane.material = mat; 
+                    //__meshObject.attachAudio?.isPlaying = false;
+                    this.toggleAudio(ObjMesh, _scene);
+
+                    break;
+
+                case ShapeType.Video:
+                    /* var planeOpts = {
+                         height: 2,
+                         width: 2,
+                         sideOrientation: BABYLON.Mesh.DOUBLESIDE
+                     };
+                     var VideoTexture = new BABYLON.VideoTexture("videoTexture", [__meshObject.mediaUrl], _scene, true, true);
+                     VideoTexture.video.muted = true; // Starts the video muted, adhering to browser policies
+                     VideoTexture.position = new BABYLON.Vector3(__meshObject.position?.x, yMeshPosition, __meshObject.position?.z);
+                     var Video = BABYLON.MeshBuilder.CreatePlane("videoPlane", planeOpts, _scene);
+                     var videoMaterial = new BABYLON.StandardMaterial("videoMat", _scene);
+                     videoMaterial.diffuseTexture = VideoTexture;
+                     Video.material = videoMaterial;
+                     Video.setParent(fountain);
+                     //scaleByFactor(Video, 0.5);*/
+                    break;
+                case ShapeType.Text:
+                    // Create 3D text
+                    var text = "Hello, Babylon.js!";
+                    var font = "36px Arial";
+                    var color = "white";
+                    var backgroundColor = "transparent";
+                    var textureText = new BABYLON.DynamicTexture("textTexture", 512, _scene, true);
+                    textureText.hasAlpha = true;
+                    textureText.drawText(text, null, null, font, color, backgroundColor, true);
+
+                    // Create a plane to apply the texture
+                    var plane = BABYLON.MeshBuilder.CreatePlane("plane", { size: 2 }, _scene);
+                    var material = new BABYLON.StandardMaterial("material", _scene);
+                    material.diffuseTexture = textureText;
+                    plane.material = material;
+                    break;
+                case ShapeType.Button:
+                    // Define the dimensions of the cuboid
+                    var width = 0.2;    // User-defined width
+                    var height = 0.1;   // User-defined height
+                    var depth = 0.01;    // User-defined depth
+
+                    // Create the cuboid mesh
+                    var btn = BABYLON.MeshBuilder.CreateBox("cuboid", { size: width }, _scene);
+                    btn.scaling.y = height / width;
+                    btn.scaling.z = depth / width;
+                    console.log('button Added: ', btn)
+                    return btn;
+                    break;
+
+                case ContentType.Hotspot:
+                    var planeOpts = {
+                        height: 0.3762,
+                        width: 0.3762,
+                        sideOrientation: BABYLON.Mesh.DOUBLESIDE,
+                    };
+                    var Image = BABYLON.MeshBuilder.CreatePlane(__meshObject.id, planeOpts, _scene);
+                    Image.position = new BABYLON.Vector3(__meshObject.position?.x, __meshObject.position?.y, __meshObject.position?.z);
+                    var mat = new BABYLON.StandardMaterial('mat1', _scene);
+                    const meshObjSetting = __meshObject.objectSettings;
+                    var texture = new BABYLON.Texture(__meshObject.mediaUrl, this.scene);
+                    mat.diffuseTexture = texture;
+                    mat.diffuseTexture.hasAlpha = true;
+                    mat.diffuseColor = new BABYLON.Color3(0, 0, 0);
+                    mat.specularColor = new BABYLON.Color3(0, 0, 0);
+                    mat.emissiveColor = meshObjSetting
+                        ? this.hexToColor3(meshObjSetting?.hotspotColor)
+                        : new Color3(0.22, 0.22, 0.22);
+                    Image.material = mat;
+                    Image.billboardMode = BABYLON.AbstractMesh.BILLBOARDMODE_ALL;
+                    console.log('Hotspot Added: ', Image);
+                    Image.setParent(fountain);
+                    break;
+            }
+        }
+
+        function event_actions(_meshObject) {
+            switch (_meshObject.actionType) {
+                case ActionType.LinkScene:
+                    //  console.log('Action : link scene');
+                    this.scene_to_scene_navigation(_meshObject);
+                    break;
+                case ActionType.LinkURL:
+                    console.log('Action : link url ' + _meshObject.actionData.url);
+                    //alert('hi');
+                    var newTab = window.open(_meshObject.actionData.url);
+                    newTab?.focus();
+                    break;
+                case ActionType.DisplayMessage:
+                    display_message(_meshObject);
+                    break;
+                case ActionType.addImage:
+                    display_image(_meshObject);
+                    break;
+                case ActionType.addVideo:
+                    display_video(_meshObject);
+                    break;
+                case ActionType.trueFalse:
+                    question_truefalse(_meshObject);
+                    break;
+                case ActionType.addQuestion:
+                    if (_meshObject.actionData.addHotspotQuestion.questionType == 'True or False') {
+                        question_truefalse(_meshObject);
+                    }
+                    if (_meshObject.actionData.addHotspotQuestion.questionType == 'Multiple Correct') {
+                        question_multiQuestion(_meshObject);
+                    }
+                    break;
+            }
+        }
+
+        function question_truefalse(_meshObject) {
+
+            let advancedTexture = BABYLON.GUI.AdvancedDynamicTexture.CreateFullscreenUI('UI');
+            var panel = new BABYLON.GUI.StackPanel();
+            panel.height = 0.4;
+            panel.width = 0.38;
+            panel.background = '';
+            let Stkopacity = _meshObject.actionData.addHotspotQuestion.transparency;
+            panel.alpha = Stkopacity ? Stkopacity : 1;
+            advancedTexture.addControl(panel);
+            let rdg = new RadioGroup(
+                _meshObject.actionData.addHotspotQuestion.question
+            );
+            if (_meshObject.actionData.addHotspotQuestion.allOptions.length > 0) {
+                for (
+                    let index = 0;
+                    index < _meshObject.actionData.addHotspotQuestion.allOptions.length;
+                    index++
+                ) {
+                    const element =
+                        _meshObject.actionData.addHotspotQuestion.allOptions[index].title;
+                    rdg.addRadio(
+                        element,
+                        () => { },
+                        //####### the below is commented as default tick on option asked to remove in preview
+                        // element == _meshObject.actionData.addHotspotQuestion.selectedAns
+                    );
+                }
+            }
+            //rdg.alignh=BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+            let spl = new BABYLON.GUI.SelectionPanel('spl');
+            let splbg = _meshObject.actionData.addHotspotQuestion.backgroundColor;
+            spl.background = splbg ? splbg : 'white';
+            spl.headerColor = _meshObject.actionData.addHotspotQuestion.questionColor;
+            spl.labelColor = _meshObject.actionData.addHotspotQuestion.answerColor;
+
+            //    var textBlock = new TextBlock();
+            // textBlock.text = "Sphere";
+            // panel.addControl(textBlock);
+
+            spl.addGroup(rdg);
+
+            const closemenu = BABYLON.GUI.Button.CreateImageOnlyButton(
+                'closemenu',
+                'assets/img/close.png'
+            );
+            closemenu.width = '40px';
+            closemenu.height = '40px';
+            closemenu.horizontalAlignment = 1;
+            closemenu.verticalAlignment = 0;
+            closemenu.top = '10px';
+            closemenu.left = 0;
+            closemenu.thickness = 0;
+
+            closemenu.onPointerClickObservable.add(function () {
+                panel.isVisible = false;
+                advancedTexture.dispose();
+                //leftbuttons.isVisible = false;
+            });
+
+            panel.addControl(closemenu);
+            panel.addControl(spl);
+
+            console.log('radio head', rdg);
+
+            // console.log('radio nnnn ',rdg['_groupHeader']['_paddingBottom'].value);
+            //rdg['_groupHeader']._groupHeader.resizeToFit = true;
+            rdg['_groupHeader']['_resizeToFit'] = true;
+            rdg['_groupHeader']['_lineSpacing'].value = 2;
+            rdg['_groupHeader']['_paddingBottom'].value = 15;
+
+            let submit_btn = BABYLON.GUI.Button.CreateSimpleButton('submit_btn_radio', 'Submit');
+            submit_btn.width = '80px';
+            submit_btn.height = '40px';
+            submit_btn.left = '30%';
+            submit_btn.paddingTop = '130%';
+            submit_btn.thickness = 0;
+            panel.addControl(submit_btn);
+
+        }
+
+        //Multiple Correct
+
+        function question_multiQuestion(_meshObject) {
+            //console.log(' bbbbbbbbbbbbbbbbbb ', _meshObject);
+
+            let advancedTexture = BABYLON.GUI.AdvancedDynamicTexture.CreateFullscreenUI('UI');
+
+            var panel = new BABYLON.GUI.StackPanel();
+            panel.height = 0.4;
+            panel.width = 0.5;
+            panel.background = '';
+            let Stkopacity = _meshObject.actionData.addHotspotQuestion.transparency;
+            panel.alpha = Stkopacity ? Stkopacity : 1;
+
+            advancedTexture.addControl(panel);
+
+            //##### the  below varibale also using for place submt button
+            var option_count;
+            option_count = 0;
+            option_count = _meshObject.actionData.addHotspotQuestion.allOptions.length;
+
+            let rdg = new CheckboxGroup(
+                _meshObject.actionData.addHotspotQuestion.question
+            );
+            if (option_count > 0) {
+                for (
+                    let index = 0;
+                    index < _meshObject.actionData.addHotspotQuestion.allOptions.length;
+                    index++
+
+                ) {
+                    const element =
+                        _meshObject.actionData.addHotspotQuestion.allOptions[index].title;
+                    rdg.addCheckbox(
+                        element,
+                        () => { },
+                        //####### the below is commented as default tick on option asked to remove in preview 20th oct 2023
+                        //###### as mentioned on above line, but here for multi checkbox the selected ans has multiple ans so loop required for below line
+                        // element == _meshObject.actionData.addHotspotQuestion.selectedAns
+                    );
+                }
+            }
+
+            //rdg.alignh=BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+
+            let spl = new BABYLON.GUI.SelectionPanel('spl');
+            let splbg = _meshObject.actionData.addHotspotQuestion.backgroundColor;
+            spl.background = splbg ? splbg : 'white';
+            spl.headerColor = _meshObject.actionData.addHotspotQuestion.questionColor;
+            spl.labelColor = _meshObject.actionData.addHotspotQuestion.answerColor;
+
+            spl.addGroup(rdg);
+
+            const closemenu = BABYLON.GUI.Button.CreateImageOnlyButton(
+                'closemenu',
+                'assets/img/close.png'
+            );
+            closemenu.width = '40px';
+            closemenu.height = '40px';
+            closemenu.horizontalAlignment = 1;
+            closemenu.verticalAlignment = 0;
+            closemenu.top = '10px';
+            closemenu.left = 0;
+            closemenu.thickness = 0;
+
+            closemenu.onPointerClickObservable.add(function () {
+                panel.isVisible = false;
+
+                advancedTexture.dispose();
+
+                //leftbuttons.isVisible = false;
+            });
+
+            panel.addControl(closemenu);
+            panel.addControl(spl);
+
+            rdg['_groupHeader']['_resizeToFit'] = true;
+            rdg['_groupHeader']['_lineSpacing'].value = 2;
+            rdg['_groupHeader']['_paddingBottom'].value = 15;
+
+            let submit_btn = BABYLON.GUI.Button.CreateSimpleButton('submit_btn_radio', 'Submit');
+            submit_btn.width = '80px';
+            submit_btn.height = '40px';
+            submit_btn.left = '30%';
+            let padding_top_val = (option_count * 10) + 100; //parseInt(parseFloat(option_count*10)+100);
+            submit_btn.paddingTop = padding_top_val + '%';
+            submit_btn.thickness = 0;
+
+            panel.addControl(submit_btn);
+
+        }
+
+        function display_video(_meshObject) {
+
+            var planeOpts = {
+                height: 1.4762 / 2,
+                // width: 1.3967 / 2,
+                sideOrientation: BABYLON.Mesh.DOUBLESIDE,
+            };
+            var Videoplane = BABYLON.MeshBuilder.CreatePlane('video', planeOpts, this.scene);
+            let zz = 0;
+            if (_meshObject.position?.z < 0) {
+                zz = -10;
+            } else {
+                zz = 10;
+            }
+
+            var vidPos = new BABYLON.Vector3(
+                _meshObject.position?.x,
+                _meshObject.position?.y,
+                zz
+            );
+            Videoplane.position = vidPos;
+            Videoplane.rotation = new BABYLON.Vector3(0, 0, 0);
+            var VideoMat = new BABYLON.StandardMaterial('m', this.scene);
+            // var VideoVidTex = new VideoTexture("video", _meshObject.mediaUrl, this.scene);
+            var VideoVidTex = new BABYLON.VideoTexture(
+                'video',
+                _meshObject.actionData.video.url,
+                this.scene
+            );
+            VideoMat.diffuseTexture = VideoVidTex;
+            VideoMat.roughness = 1;
+            VideoMat.emissiveColor = Color3.White();
+            VideoMat.alpha = 1 - _meshObject.actionData.video.transparency;
+            Videoplane.material = VideoMat;
+            Videoplane.scaling = new Vector3(15, 10, 1);
+            Videoplane.billboardMode = AbstractMesh.BILLBOARDMODE_ALL;
+
+            let advancedTexture = BABYLON.GUI.AdvancedDynamicTexture.CreateFullscreenUI('UI');
+            const closemenu = BABYLON.GUI.Button.CreateImageOnlyButton(
+                'closemenu',
+                'assets/img/close.png'
+            );
+            closemenu.width = '40px';
+            closemenu.height = '40px';
+            closemenu.thickness = 0;
+            advancedTexture.addControl(closemenu);
+            closemenu.onPointerClickObservable.add(() => {
+                advancedTexture.dispose();
+                Videoplane.dispose();
+                closemenu.dispose();
+            });
+        }
+
+        function display_message(_meshObject) {
+
+            var advancedTexture = BABYLON.GUI.AdvancedDynamicTexture.CreateFullscreenUI('UI');
+            var stackPanel = new BABYLON.GUI.StackPanel();
+
+            stackPanel.height = 0.2;
+            stackPanel.width = 0.4;
+            stackPanel.alpha = 0.8;
+            stackPanel.verticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_CENTER;
+            stackPanel.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
+            stackPanel.background = _meshObject.actionData.displayMassage.backgroundColor;
+
+            let Stkopacity = _meshObject.actionData.displayMassage.transparency;
+            stackPanel.alpha = Stkopacity ? Stkopacity : 1;
+
+            stackPanel.isVertical = true;
+            advancedTexture.addControl(stackPanel);
+
+            var text1 = new BABYLON.GUI.TextBlock();
+            text1.text = _meshObject.actionData.displayMassage.dmsg;
+            text1.textVerticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_CENTER;
+            text1.textHorizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
+            text1.verticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_CENTER;
+            text1.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
+            text1.resizeToFit = true;
+            text1.textWrapping = true;
+            text1.color = _meshObject.actionData.displayMassage.textColor ?? new Color3(0, 0, 0);
+            text1.fontSize = 18;
+            text1.height = '30px';
+
+            let spl = new BABYLON.GUI.SelectionPanel('spl');
+            spl.color = _meshObject.actionData.displayMassage.borderColor ?? 'transparent';//new Color3(0.22, 0.22, 0.22); //_meshObject.actionData.displayMassage.borderColor;
+            spl.height = 1; //stackPanel.height;
+            spl.width = 1; //stackPanel.width;
+            console.log('spl.color : ', spl.color);
+
+            if (spl.color == 'transparent' || spl.color == '') {
+                spl.color = _meshObject.actionData.displayMassage.backgroundColor;
+            }
+            const closemenu = BABYLON.GUI.Button.CreateImageOnlyButton(
+                'closemenu',
+                'assets/img/close.png'
+            );
+            closemenu.width = '30px';
+            closemenu.height = '30px';
+            closemenu.horizontalAlignment = 1;
+            closemenu.verticalAlignment = 1;
+            closemenu.top = '-10px';
+            closemenu.left = 0;
+            closemenu.thickness = 0;
+
+            closemenu.onPointerClickObservable.add(function () {
+                stackPanel.isVisible = false;
+            });
+            stackPanel.addControl(spl);
+            stackPanel.addControl(closemenu);
+            spl.addControl(text1);
+        }
+
+        function display_image(_meshObject) {
+
+            let advancedTexture = BABYLON.GUI.AdvancedDynamicTexture.CreateFullscreenUI('UI');
+
+            var popupicon = BABYLON.GUI.Button.CreateImageOnlyButton(
+                'btn',
+                'assets/img/fileinfo.png'
+            );
+            // button2.image.stretch = Image.STRETCH_UNIFORM;
+            popupicon.width = '80px';
+            popupicon.height = '80px';
+            popupicon.horizontalAlignment = 0;
+            popupicon.left = '80px';
+            popupicon.thickness = 2;
+            popupicon.color = 'transparent';
+
+            advancedTexture.addControl(popupicon);
+
+            const Rectangle_box = new BABYLON.Rectangle('leftmenu');
+            Rectangle_box.width = '300px';
+            Rectangle_box.horizontalAlignment = 0;
+            //leftmenu.background = "Red";
+            Rectangle_box.thickness = 0;
+            Rectangle_box.color = 'transparent';
+            Rectangle_box.isVisible = false;
+            advancedTexture.addControl(Rectangle_box);
+
+            const leftbuttons = new BABYLON.Rectangle('leftbuttons');
+            leftbuttons.width = '300px';
+            leftbuttons.horizontalAlignment = 0;
+            leftbuttons.background = 'transparent';
+            leftbuttons.isVisible = false;
+            leftbuttons.color = 'transparent';
+            leftbuttons.thickness = 0;
+
+            advancedTexture.addControl(leftbuttons);
+
+            const closemenu = BABYLON.GUI.Button.CreateImageOnlyButton(
+                'closemenu',
+                'assets/img/close.png'
+            );
+            closemenu.width = '40px';
+            closemenu.height = '40px';
+            closemenu.horizontalAlignment = 1;
+            closemenu.verticalAlignment = 0;
+            closemenu.top = '10px';
+            closemenu.left = 0;
+            closemenu.thickness = 0;
+
+            leftbuttons.addControl(closemenu);
+
+            const btnfwd = BABYLON.GUI.Button.CreateImageOnlyButton(
+                'btnfwd',
+                'assets/img/next.png'
+            );
+            btnfwd.width = '40px';
+            btnfwd.height = '40px';
+            btnfwd.horizontalAlignment = 1;
+            btnfwd.verticalAlignment = 0;
+            btnfwd.top = '180px';
+            btnfwd.left = 0;
+            btnfwd.thickness = 0;
+            btnfwd.isVisible = false; // later remove when we have mulitple images
+
+            leftbuttons.addControl(btnfwd);
+
+            const btnbck = BABYLON.GUI.Button.CreateImageOnlyButton(
+                'btnbck',
+                'assets/img/preview.png'
+            );
+            btnbck.width = '40px';
+            btnbck.height = '40px';
+            btnbck.horizontalAlignment = 0;
+            btnbck.verticalAlignment = 0;
+            //btnbck.image.rotation = Math.PI;
+            btnbck.top = '180px';
+            btnbck.left = 0;
+            btnbck.thickness = 0;
+            btnbck.isVisible = false; // later remove when we have mulitple images
+
+            leftbuttons.addControl(btnbck);
+
+            const myScrollViewer = new ScrollViewer('name');
+            myScrollViewer.width = 1;
+            myScrollViewer.height = '400px';
+            myScrollViewer.horizontalAlignment = 0;
+            myScrollViewer.verticalAlignment = 0;
+            myScrollViewer.thickness = 0;
+            myScrollViewer.background = 'transparent';
+
+            //make the bar invisible/no size
+            myScrollViewer.barSize = 0;
+
+            Rectangle_box.addControl(myScrollViewer);
+
+            var svcontainer = new BABYLON.GUI.StackPanel('svcontainer');
+            svcontainer.isVertical = false;
+            svcontainer.height = '100%';
+            svcontainer.background = 'transparent';
+            svcontainer.color = 'red';
+            //  svcontainer.thickness = 0;
+            svcontainer.alpha = 0.65;
+            //svcontainer.cornerRadius = 6;
+            svcontainer.adaptWidthToChildren = true;
+
+            myScrollViewer.addControl(svcontainer);
+
+            // add default imge  here
+
+            var image = Button.CreateImageOnlyButton(
+                'b0',
+                _meshObject.actionData.image.url
+            );
+
+            // console.log( _meshObject.actionData, ' cvvvvvvvvvvvvvvvvvvvvvvvv ', _meshObject.actionData.image.url);
+
+            image.horizontalAlignment = 0;
+            image.width = '300px';
+            image.height = '100px';
+            image.thickness = 0;
+            image.cornerRadius = 10;
+            image.background = '#11111111';
+
+            svcontainer.addControl(image);
+
+            //store a variable counting the number of steps/images to set the value of sv with arrow buttons
+            var svstep = 1;
+
+            //try change this variable to add an image to the sv container
+            var addimage = true;
+
+            popupicon.onPointerClickObservable.add(function () {
+                popupicon.isVisible = false;
+                Rectangle_box.isVisible = true;
+                leftbuttons.isVisible = true;
+
+            });
+
+            btnfwd.onPointerClickObservable.add(function () {
+                myScrollViewer.horizontalBar.value += 1 / svstep;
+            });
+
+            btnbck.onPointerClickObservable.add(function () {
+                myScrollViewer.horizontalBar.value -= 1 / svstep;
+            });
+
+            closemenu.onPointerClickObservable.add(function () {
+                Rectangle_box.isVisible = false;
+                leftbuttons.isVisible = false;
+                advancedTexture.dispose();
+            });
+        }
+
+
+        function toggleAudio(meshObject, _scene) {
+            const mesh = meshObject.mesh;
+
+            if(mesh) {
+                console.log('this.toggleAudio');
+                var imgMat = new BABYLON.GUI.StandardMaterial('audio', _scene);
+                if (meshObject?.attachAudio?.isPlaying) {
+                    console.log('audioin');
+                    imgMat.diffuseTexture = new BABYLON.Texture("assets/audio.png", _scene);
+                    imgMat.diffuseTexture.hasAlpha = true;                   
+
+                } else {
+                    console.log('audioout');
+                    imgMat.diffuseTexture = new BABYLON.Texture("assets/audio.png", _scene);
+                    imgMat.diffuseTexture.hasAlpha = true;
+                }
+                mesh.material = imgMat;
+            }
+        }
+
+        function hexToColor3(hexColor) {
+            if (hexColor.charAt(0) === '#') {
+                hexColor = hexColor.substring(1);
+            }
+            var r = parseInt(hexColor.substring(0, 2), 16) / 255;
+            var g = parseInt(hexColor.substring(2, 4), 16) / 255;
+            var b = parseInt(hexColor.substring(4, 6), 16) / 255;
+            return new BABYLON.Color3(r, g, b);
+        }
+        const ShapeType = {
+            Sphere: 'sphere',
+            Cube: 'cube',
+            Cylinder: 'cylinder',
+            Cone: 'cone',
+            Capsule: 'capsule',
+            PolyheDron: 'polyhedron',
+            GoldBerg: 'goldberg',
+            IcoSphere: 'icosphere',
+            Torus: 'torus',
+            TorusKnot: 'torusKnot',
+            GLTF: 'gltf',
+            Video: 'video',
+            Image: 'image',
+            Audio: 'audio',
+            Text: 'text',
+            Button: 'button'
+        }
+        const ActionType = {
+            LinkScene: 'link_to_scene',
+            LinkURL: 'link_to_URL',
+            DisplayMessage: 'display_message',
+            LinkAttachment: 'link_to_attachment',
+            Move: 'move',
+            Rotate: 'rotate',
+            Scale: 'scale',
+            Bounce: 'bounce',
+            Show: 'show',
+            Hide: 'hide',
+            addImage: 'add_image',
+            addVideo: 'add_video',
+            singleCorrect: 'Single Correct',
+            trueFalse: 'True or False',
+            multiQuestion: 'Multiple Correct'
+        }
+        const ContentType = {
+            GLTF: 'gltf',
+            Image: 'image',
+            Video: 'video',
+            Audio: 'audio',
+            Text: 'text',
+            Button: 'button',
+            Hotspot: 'hotspot',
+        }
+    </script>
+</body>
+</html>

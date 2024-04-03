@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Roboto+Flex:opsz,wght@8..144,700&family=Roboto:ital,wght@0,500;1,300;1,400&display=swap"
+      rel="stylesheet"
+    />
+    <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+    <title>Avaturn iframe Example</title>
+    <link href="./style.css" rel="stylesheet" />
+  </head>
+
+  <body onload="openIframe()">
+    <section class="main">
+     
+      <div class="link">
+        Button to download avatar will appear here:
+        <a id="glb" href="#" style="color: #e1ff67;">Download GLB</a>
+      </div>
+    </section>
+    <iframe id="frame" class="frame" allow="camera *; clipboard-write">
+    </iframe>
+    <div class="link">
+      <a
+        href="https://avaturn.me"
+        style="text-decoration: none; color: #0c0c0e;"
+        >Avaturn</a
+      >
+    </div>
+    <script>
+      const frame = document.getElementById("frame");
+      frame.hidden = true;
+
+      document.getElementById("glb").hidden = true;
+
+      window.addEventListener("message", subscribe);
+      document.addEventListener("message", subscribe);
+
+      function subscribe(event) {
+        /* Here we process the events from the iframe */
+
+        let json;
+		console.log("event",event)
+        try {
+          json = JSON.parse(event.data);
+        } catch (error) {
+          console.log("Error parsing the event data.");
+          return;
+        }
+
+        if (json.source !== "avaturn") {
+          return;
+        }
+
+        // Get avatar GLB URL
+        if (json.eventName === "v2.avatar.exported") {
+          alert(
+            "Received an export message from avaturn. GLB link should appear."
+          );
+
+          let glb_el = document.getElementById("glb");
+          glb_el.href = json.data.url;
+          glb_el.download = "avaturn_demo_avatar.glb";
+          glb_el.hidden = false;
+		   alert(
+            json.data.url
+          );
+        }
+      }
+
+      function openIframe() {
+        // Replace it with your own subdomain
+        let subdomain = "demo";
+        frame.src = `https://${subdomain}.avaturn.dev/iframe`;
+        frame.hidden = false;
+      }
+      function closeIframe() {
+        frame.src = "";
+        frame.hidden = true;
+      }
+    </script>
+  </body>
+</html>
